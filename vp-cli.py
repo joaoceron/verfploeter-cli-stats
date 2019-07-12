@@ -16,21 +16,45 @@ import queue as queue
 import time 
 from argparse import RawTextHelpFormatter
 from os import linesep
+import imp
+import logging
 
 ###############################################################################
 ### Program settings
 verbose = False
 version = 0.5
-
+program_name = os.path.basename(__file__)
 ###############################################################################
 ### Subrotines
+
+
+#------------------------------------------------------------------------------
+def set_log_level(level=None):
+    """Sets the log level of the notebook. Per default this is 'INFO' but
+    can be changed.
+    :param level: level to be passed to logging (defaults to 'INFO')
+    :type level: str
+    """
+    imp.reload(logging)
+#    logging.basicConfig(format='%(filename)s - %(asctime)s :  %(levelname)8s - %(message)s', "%Y-%m-%d %H:%M:%S",
+#                        level=level)
+
+#    formatter = logging.Formatter("%(asctime)s;%(levelname)s;%(message)s",
+#                                          "%Y-%m-%d %H:%M:%S")
+
+    logging.basicConfig(
+	    level=logging.DEBUG,
+	    format='%(asctime)s.%(msecs)03d %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S',
+     )
 
 #------------------------------------------------------------------------------
 def parser_args ():
 
-    parser = argparse.ArgumentParser(prog='vp-cli.py', usage='%(prog)s [options]', formatter_class=RawTextHelpFormatter)
+    #parser = argparse.ArgumentParser(prog=program_name, usage='%(prog)s [options]', formatter_class=RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(prog=program_name, usage='%(prog)s [options]')
     parser.add_argument("--version", help="print version and exit", action="store_true")
-    parser.add_argument("-v","--verbose", help="print debug info", action="store_true")
+    parser.add_argument("-v","--verbose", help="print info msg", action="store_true")
+    parser.add_argument("-d","--debug", help="print debug info", action="store_true")
     parser.add_argument("-q","--quiet", help="ignore animation", action="store_true")
     parser.add_argument('-f','--file', nargs='?', help="Verfploeter measurement output file")
     parser.add_argument("-n","--normalize", help="remove inconsistency from the measurement dataset", action="store_true")
@@ -73,12 +97,14 @@ def animated_loading(flag):
     if (flag == 3):
         chars = "⣾⣽⣻⢿⡿⣟⣯⣷"
         msg = "saving dataframe      "
+    os.system('setterm -cursor off')
 
     for char in chars:
 
         sys.stdout.write('\r'+msg+''+char)
         time.sleep(.1)
         sys.stdout.flush()
+#    os.system('setterm -cursor on')
 
 #------------------------------------------------------------------------------
 # load the dataframe 
@@ -112,6 +138,11 @@ def add_metadata(df,args):
     	animated_loading(2) if not (args.quiet) else 0
     the_process.join()
     df = ret.get()
+
+    # fix formating
+    if (not args.quiet) or (not args.debug) or (not args.verbose):
+        print ("\r                      ")
+
     return(df)
 
 #------------------------------------------------------------------------------
@@ -134,7 +165,7 @@ def bar(row):
 #------------------------------------------------------------------------------
 # save df - threading
 def save_df(ret,args,df):
-    outputfile = str(args.file.split(".")[:-2][0])+"-csv.norm.gz"
+    outputfile = str(args.file.split(".")[:-1][0])+"-csv.norm.gz"
     df.to_csv(outputfile,index=False, compression="gzip")
     ret.put(outputfile)
 
@@ -184,6 +215,10 @@ def evaluate_args():
     parser = parser_args()
     args = parser.parse_args()
 
+    if (args.debug):
+        set_log_level('DEBUG')
+        logging.debug(args)
+
     if (args.version):
         print (version)
         sys.exit(0)
@@ -224,7 +259,6 @@ if (args.normalize):
         sys.exit(0)
         
 #-------
-
 df = init_load(args)
 
 if (args.normalize):
@@ -233,6 +267,8 @@ if (args.normalize):
 
     ## check for metadata and pre-processing tasks
     print ("saving normalized file\n") if (args.verbose) else 0
+    logging.debug('msg: saving normalized file')
+
     ret = queue.Queue()
     the_process = threading.Thread(name='process', target=save_df, args=(ret,args,df))
     the_process.start()
@@ -247,7 +283,6 @@ if (args.normalize):
 else:
     print('\rdataframe processing ... done!\n')
 
-
 # new stats df 
 s = df.catchment
 counts = s.value_counts()
@@ -261,4 +296,4 @@ longest_label_length = len(df_summary['index'].max())
 longest_count_length = len(df_summary['counts'].max().astype(str))
 
 ret  = df_summary.apply(bar, axis=1)
-print ("")
+sys.exit(0)
