@@ -9,6 +9,7 @@
 ### Python modules
 import os
 import sys
+import re
 import pandas as pd
 import argparse
 import threading
@@ -110,7 +111,7 @@ def animated_loading(flag):
 # load the dataframe 
 def load_df (ret,file):
 
-	print ("reading the dataframe") if (args.verbose) else 0
+	logging.debug("loading the dataframe") 
 	df = pd.read_csv(file, sep=",", index_col=False, low_memory=False, skiprows=0)
 	ret.put(df) 
 
@@ -130,7 +131,7 @@ def insert_metadata(ret,df,args):
 def add_metadata(df,args):
 
     ## check for metadata and pre-processing tasks
-    print ("inserting dataframe metadata") if (args.verbose) else 0
+    print ("\rinserting dataframe metadata") if (args.verbose) else 0
     ret = queue.Queue()
     the_process = threading.Thread(name='process', target=insert_metadata, args=(ret,df,args))
     the_process.start()
@@ -140,8 +141,8 @@ def add_metadata(df,args):
     df = ret.get()
 
     # fix formating
-    if (not args.quiet) or (not args.debug) or (not args.verbose):
-        print ("\r                      ")
+#    if (not args.quiet) or (not args.debug) or (not args.verbose):
+#        print ("\r                      ")
 
     return(df)
 
@@ -165,10 +166,10 @@ def bar(row):
 #------------------------------------------------------------------------------
 # save df - threading
 def save_df(ret,args,df):
-    outputfile = str(args.file.split(".")[:-1][0])+"-csv.norm.gz"
+
+    outputfile = re.sub('.csv.*', '', args.file)+"-csv.norm.gz"
     df.to_csv(outputfile,index=False, compression="gzip")
     ret.put(outputfile)
-
 
 #------------------------------------------------------------------------------
 # load the dataframe and remove inconsistency
@@ -186,7 +187,7 @@ def init_load(args):
     df = ret.get()
     
     ## check for metadata and pre-processing tasks
-    print ("checking dataframe metadata\n") if (args.verbose) else 0
+    print ("\rchecking dataframe metadata\n") if (args.verbose) else 0
     ret = queue.Queue()
     the_process = threading.Thread(name='process', target=check_metadata_from_df, args=(ret,df))
     the_process.start()
@@ -266,7 +267,7 @@ if (args.normalize):
 
 
     ## check for metadata and pre-processing tasks
-    print ("saving normalized file\n") if (args.verbose) else 0
+    print ("\rsaving normalized file    ") if (args.verbose) else 0
     logging.debug('msg: saving normalized file')
 
     ret = queue.Queue()
@@ -278,22 +279,23 @@ if (args.normalize):
     the_process.join()
     outputfile = ret.get()
     print ("\r{}                 ".format(outputfile))
-    sys.exit(0)
 
 else:
-    print('\rdataframe processing ... done!\n')
+    print('\rdataframe processing ... done!')
 
-# new stats df 
-s = df.catchment
-counts = s.value_counts()
-percent100 = s.value_counts(normalize=True).mul(100).round(1).astype(int)
-df_summary = pd.DataFrame({'counts': counts, 'percent': percent100}).reset_index()
+    # new stats df 
+    s = df.catchment
+    counts = s.value_counts()
+    percent100 = s.value_counts(normalize=True).mul(100).round(1).astype(int)
+    df_summary = pd.DataFrame({'counts': counts, 'percent': percent100}).reset_index()
+    
+    # print ascii bar chart
+    max_value = df_summary.percent.max()
+    increment = max_value / 25
+    longest_label_length = len(df_summary['index'].max())
+    longest_count_length = len(df_summary['counts'].max().astype(str))
+    
+    ret  = df_summary.apply(bar, axis=1)
 
-# print ascii bar chart
-max_value = df_summary.percent.max()
-increment = max_value / 25
-longest_label_length = len(df_summary['index'].max())
-longest_count_length = len(df_summary['counts'].max().astype(str))
-
-ret  = df_summary.apply(bar, axis=1)
+os.system('setterm -cursor on')
 sys.exit(0)
