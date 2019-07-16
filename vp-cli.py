@@ -30,23 +30,19 @@ program_name = os.path.basename(__file__)
 
 
 #------------------------------------------------------------------------------
-def set_log_level(level=None):
+def set_log_level(log_level=logging.INFO):
     """Sets the log level of the notebook. Per default this is 'INFO' but
     can be changed.
     :param level: level to be passed to logging (defaults to 'INFO')
     :type level: str
     """
     imp.reload(logging)
-#    logging.basicConfig(format='%(filename)s - %(asctime)s :  %(levelname)8s - %(message)s', "%Y-%m-%d %H:%M:%S",
-#                        level=level)
-
-#    formatter = logging.Formatter("%(asctime)s;%(levelname)s;%(message)s",
-#                                          "%Y-%m-%d %H:%M:%S")
-
     logging.basicConfig(
-	    level=logging.DEBUG,
-	    format='%(asctime)s.%(msecs)03d %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S',
-     )
+            level=log_level,
+	    format='%(asctime)s.%(msecs)03d %(levelname)s - %(message)s', 
+            datefmt='%Y-%m-%d %H:%M:%S',
+    )
+
 
 #------------------------------------------------------------------------------
 def parser_args ():
@@ -68,18 +64,23 @@ def parser_args ():
     parser.add_argument("--stats", dest="stat",  choices=["load", "block", "country"], default="load",
 	help="show stats from the vp measurement. Potential options:" + linesep +
 	        linesep.join("    " + name for name in ["load (default)", "block", "country"]))
-
     return parser
 
 #------------------------------------------------------------------------------
 # ## remove inconsistency and add metadata field
-def check_metadata_from_df(ret,df):
+def check_metadata_from_df(ret,df,args):
   
     # remove inconsistency
+    if (args.debug):
+        logging.debug("Before removing inconsistency: \"%d\"", len(df))
+
     df = df[df['destination_address'] == df['meta_source_address']]
     df = df[df['source_address'] == df['meta_destination_address']]
     df['src_net'] =  df.source_address.str.extract('(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.)\\d{1,3}')+"0"
     df.drop_duplicates(subset="src_net",keep='first', inplace=True)
+
+    if (args.debug):
+        logging.debug("After removing inconsistency: \"%d\"", len(df))
     ret.put(df)
 
 #------------------------------------------------------------------------------
@@ -131,7 +132,7 @@ def insert_metadata(ret,df,args):
 def add_metadata(df,args):
 
     ## check for metadata and pre-processing tasks
-    print ("\rinserting dataframe metadata") if (args.verbose) else 0
+    logging.info("inserting dataframe metadata")
     ret = queue.Queue()
     the_process = threading.Thread(name='process', target=insert_metadata, args=(ret,df,args))
     the_process.start()
@@ -139,10 +140,6 @@ def add_metadata(df,args):
     	animated_loading(2) if not (args.quiet) else 0
     the_process.join()
     df = ret.get()
-
-    # fix formating
-#    if (not args.quiet) or (not args.debug) or (not args.verbose):
-#        print ("\r                      ")
 
     return(df)
 
@@ -177,7 +174,8 @@ def init_load(args):
 
     file = args.file
     ## load dataframe
-    print ("reading the dataframe - file {}".format(file)) if (args.verbose) else 0
+    logging.info("reading the dataframe - file {}".format(file)) 
+    logging.debug("reading the dataframe - file {}".format(file)) 
     ret = queue.Queue()
     the_process = threading.Thread(name='process', target=load_df, args=(ret,file))
     the_process.start()
@@ -187,13 +185,13 @@ def init_load(args):
     df = ret.get()
     
     ## check for metadata and pre-processing tasks
-    print ("\rchecking dataframe metadata\n") if (args.verbose) else 0
+    logging.debug("checking dataframe metadata")
+    logging.info("checking dataframe metadata")
     ret = queue.Queue()
-    the_process = threading.Thread(name='process', target=check_metadata_from_df, args=(ret,df))
+    the_process = threading.Thread(name='process', target=check_metadata_from_df, args=(ret,df,args))
     the_process.start()
     while the_process.isAlive():
     	animated_loading(1) if not (args.quiet) else 0
-    
     the_process.join()
     df = ret.get()
     
@@ -218,6 +216,7 @@ def evaluate_args():
 
     if (args.debug):
         set_log_level('DEBUG')
+        args.quiet=True
         logging.debug(args)
 
     if (args.version):
@@ -226,7 +225,8 @@ def evaluate_args():
     
     if (args.verbose):
         verbose=True
-        print (args)
+        set_log_level('INFO')
+        args.quiet=True
     
     if (args.file):
         file = args.file
@@ -261,28 +261,28 @@ if (args.normalize):
         
 #-------
 df = init_load(args)
-
 if (args.normalize):
     df = add_metadata(df,args)
 
 
     ## check for metadata and pre-processing tasks
-    print ("\rsaving normalized file    ") if (args.verbose) else 0
-    logging.debug('msg: saving normalized file')
+    logging.info("saving normalized file") 
+    logging.debug("saving normalized file")
 
     ret = queue.Queue()
     the_process = threading.Thread(name='process', target=save_df, args=(ret,args,df))
     the_process.start()
     while the_process.isAlive():
     	animated_loading(3) if not (args.quiet) else 0
-    
     the_process.join()
     outputfile = ret.get()
-    print ("\r{}                 ".format(outputfile))
+    logging.debug("saving dataframe ... {} done!".format(outputfile))
+    logging.info("saving dataframe ... {} done!".format(outputfile))
+    print ("\r"+outputfile)
 
 else:
-    print('\rdataframe processing ... done!')
-
+    logging.debug('\rdataframe processing ... done! ')
+    print ("\rCatchment Node Distribution:")
     # new stats df 
     s = df.catchment
     counts = s.value_counts()
