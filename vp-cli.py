@@ -19,6 +19,7 @@ from argparse import RawTextHelpFormatter
 from os import linesep
 import imp
 import logging
+import IP2Location
 
 ###############################################################################
 ### Program settings
@@ -27,7 +28,6 @@ version = 0.5
 program_name = os.path.basename(__file__)
 ###############################################################################
 ### Subrotines
-
 
 #------------------------------------------------------------------------------
 def set_log_level(log_level=logging.INFO):
@@ -55,7 +55,7 @@ def parser_args ():
     parser.add_argument("-q","--quiet", help="ignore animation", action="store_true")
     parser.add_argument('-f','--file', nargs='?', help="Verfploeter measurement output file")
     parser.add_argument("-n","--normalize", help="remove inconsistency from the measurement dataset", action="store_true")
-
+    parser.add_argument("-g","--geo",  nargs='+', help="geo-location database - IP2Location (BIN)")
     parser.add_argument('-s','--source', nargs='?', help="Verfploeter source pinger node")
     parser.add_argument('-b','--bgp', nargs='?', help="BGP status")
 
@@ -74,9 +74,14 @@ def check_metadata_from_df(ret,df,args):
     if (args.debug):
         logging.debug("Before removing inconsistency: \"%d\"", len(df))
 
+    # set timestamp as the first transmited packet for the whole measurement
+    df['timestamp'] = pd.to_datetime(df['transmit_time'],unit='ns', utc=True)
+    df['id'] = df['transmit_time'].min()
+
     df = df[df['destination_address'] == df['meta_source_address']]
     df = df[df['source_address'] == df['meta_destination_address']]
     df['src_net'] =  df.source_address.str.extract('(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.)\\d{1,3}')+"0"
+    df = df.fillna(0)
     df.drop_duplicates(subset="src_net",keep='first', inplace=True)
 
     if (args.debug):
@@ -97,6 +102,11 @@ def animated_loading(flag):
         chars = "▖▘▝▗"
         msg = "inserting metadata    "
     if (flag == 3):
+        chars = "▖▘▝▗"
+        msg = "finding geo info      "
+    os.system('setterm -cursor off')
+
+    if (flag == 4):
         chars = "⣾⣽⣻⢿⡿⣟⣯⣷"
         msg = "saving dataframe      "
     os.system('setterm -cursor off')
@@ -113,7 +123,7 @@ def animated_loading(flag):
 def load_df (ret,file):
 
 	logging.debug("loading the dataframe") 
-	df = pd.read_csv(file, sep=",", index_col=False, low_memory=False, skiprows=0)
+	df = pd.read_csv(file, sep=",", index_col=False, low_memory=False, nrows=100,skiprows=0)
 	ret.put(df) 
 
 #------------------------------------------------------------------------------
@@ -143,6 +153,50 @@ def add_metadata(df,args):
 
     return(df)
 
+#------------------------------------------------------------------------------
+# add geo info in the dataframe
+def ip2location_info(src_net, args,df):
+    ip2location = args.ip2location
+
+    rec = ip2location.get_all(src_net)
+    country_short = (rec.country_short).decode("utf-8") if rec.country_short else "Unknown"
+    region = (rec.region).decode("utf-8") if rec.region else "Unknown"
+    lat = rec.latitude if  rec.latitude else 0
+    lon = rec.longitude if rec.longitude else 0
+    
+    result = "{};{};{};{}".format(country_short,region,lat,lon)
+    test = len(result.split(";"))
+    if (test != 4):
+        print (result)
+    return  (result)
+
+
+#------------------------------------------------------------------------------
+# add geo  - threading
+def add_geo(ret,args,df):
+
+    if not (args.geo):
+        ret.put(df)
+        return
+
+    df['result'] = df['src_net'].apply(ip2location_info, args=(args,df))
+    df[['cc_ip2info','state', 'lat','long']] = df['result'].str.split (";", expand=True)
+
+
+    # get unique IPs
+    # unique_ips = x['ip'].unique()
+    # make series out of it
+    # unique_ips = pd.Series(unique_ips, index = unique_ips)
+    # map IP --> country
+    # x['country'] = x['ip'].map(unique_ips.apply(get_country))
+
+
+    #x['country'] = x['ip'].map(unique_ips.apply(get_country))
+
+
+
+    df.drop('result',axis=1,inplace=True)
+    ret.put(df)
 #------------------------------------------------------------------------------
 # plot the graph
 def bar(row):
@@ -183,7 +237,11 @@ def init_load(args):
     	animated_loading(0) if not (args.quiet) else 0
     the_process.join()
     df = ret.get()
-    
+   
+
+    if not 'transmit_time' in df.columns:
+        return (df)
+
     ## check for metadata and pre-processing tasks
     logging.debug("checking dataframe metadata")
     logging.info("checking dataframe metadata")
@@ -227,7 +285,18 @@ def evaluate_args():
         verbose=True
         set_log_level('INFO')
         args.quiet=True
-    
+ 
+    if (args.geo):
+        file = args.geo[0]
+        if not (os.path.isfile(file)):
+            print ("Geo database file not found: {}".format(file))
+            sys.exit(0)
+
+        ip2location = IP2Location.IP2Location()
+        ip2location.open(file)
+        # return reference in this var
+        args.ip2location=ip2location
+
     if (args.file):
         file = args.file
         if not (os.path.isfile(file)):
@@ -268,6 +337,15 @@ if (args.normalize):
     ## check for metadata and pre-processing tasks
     logging.info("saving normalized file") 
     logging.debug("saving normalized file")
+    
+    # thread add geo info 
+    ret = queue.Queue()
+    the_process = threading.Thread(name='process', target=add_geo, args=(ret,args,df))
+    the_process.start()
+    while the_process.isAlive():
+    	animated_loading(3) if not (args.quiet) else 0
+    the_process.join()
+    df = ret.get()
 
     ret = queue.Queue()
     the_process = threading.Thread(name='process', target=save_df, args=(ret,args,df))
