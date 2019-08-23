@@ -1,2 +1,2 @@
 # verfploeter-cli-stats
-The script extracts info from the verfploeter stats file
+Script used to extract and summarize info from our anycast measurement tool (verfploeter).
