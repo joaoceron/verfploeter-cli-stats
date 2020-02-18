@@ -1,6 +1,6 @@
 # verfploeter-cli-stats
 Script used to extract and summarize info from our anycast measurement tool (verfploeter).
-``
+<pre>
 usage: vp-cli.py [options]
 
 optional arguments:
@@ -23,3 +23,4 @@ optional arguments:
   --stats {load,block,country}
                         show stats from the vp measurement. Potential options:
                         load (default) block country
+                        </pre>
