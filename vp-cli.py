@@ -28,7 +28,7 @@ import cursor
 ###############################################################################
 ### Program settings
 verbose = False
-version = 0.5
+version = 0.9
 program_name = os.path.basename(__file__)
 ###############################################################################
 ### Subrotines
@@ -58,16 +58,18 @@ def parser_args ():
     parser.add_argument("-d","--debug", help="print debug info", action="store_true")
     parser.add_argument("-q","--quiet", help="ignore animation", action="store_true")
     parser.add_argument('-f','--file', nargs='?', help="Verfploeter measurement output file")
-    parser.add_argument("-n","--normalize", help="remove inconsistency from the measurement dataset", action="store_true")
+    parser.add_argument("-n","--normalize", help="remove inconsistency from the measurement dataset and rebuild geolocation", action="store_true")
     parser.add_argument("-g","--geo",  nargs='+', help="geo-location database - IP2Location (BIN)")
     parser.add_argument("--hitlist",  nargs='+', help="IPv4 hitlist - used to find unknown stats", dest="hitlist")
-    parser.add_argument('-s','--source', nargs='?', help="Verfploeter source pinger node")
-    parser.add_argument('-b','--bgp', nargs='?', help="BGP status")
+    parser.add_argument('-s','--source', nargs='?', help="Verfploeter source pinger node to be inserted as metadata")
+    parser.add_argument('-b','--bgp', nargs='?', help="BGP policy to be inserted as metadata" )
+    parser.add_argument('-w','--weight', nargs='+', help="File used to weight the /24. Use the SIDN load file.")
+    parser.add_argument("--csv", help="print server load distribution using csv", action="store_true")
 
-    # TODO
-    parser.add_argument("--stats", dest="stats",  choices=["load", "block", "country"], default="",
-	help="show stats from the vp measurement. Potential options:" + linesep +
-	        linesep.join("    " + name for name in ["load (default)", "block", "country"]))
+    # TODO block and country
+#    parser.add_argument("--stats", dest="stats",  choices=["load", "block", "country"], default="",
+#	help="show stats from the vp measurement. Potential options:" + linesep +
+#	        linesep.join("    " + name for name in ["load (default)", "block", "country"]))
     return parser
 
 #------------------------------------------------------------------------------
@@ -159,13 +161,20 @@ def add_metadata(df,args):
 
     ## check for metadata and pre-processing tasks
     logging.info("inserting dataframe metadata")
-    ret = queue.Queue()
-    the_process = threading.Thread(name='process', target=insert_metadata, args=(ret,df,args))
-    the_process.start()
-    while the_process.isAlive():
-    	animated_loading(2) if not (args.quiet) else 0
-    the_process.join()
-    df = ret.get()
+
+    # add extra metadata info
+    # origin = node that has started the ping process
+    # bgp = current bgp announces
+    df['origin'] = args.source
+    df['bgp'] = args.bgp
+ 
+    #ret = queue.Queue()
+    #the_process = threading.Thread(name='process', target=insert_metadata, args=(ret,df,args))
+    #the_process.start()
+    #while the_process.isAlive():
+    #	animated_loading(2) if not (args.quiet) else 0
+    #the_process.join()
+    #df = ret.get()
 
     return(df)
 
@@ -236,7 +245,7 @@ def bar(row):
     percent = int(row['percent'])
     bar_chunks, remainder = divmod(int(percent * 8 / increment), 8)
     count = str(row['counts'])
-    label = row['index']
+    label = row['site']
     percent = str(percent)
 
     bar = '█' * bar_chunks
@@ -295,6 +304,18 @@ def init_load(args):
 
 #------------------------------------------------------------------------------
 # check parameters
+def add_weight(filename,df):
+
+    df_load = pd.read_csv(filename,names=['netblock','weight'], index_col=False, low_memory=False, skiprows=0)
+    df_load = df_load.sort_values(by='netblock')
+    df_aux = pd.merge(df, df_load, left_on='src_net',right_on='netblock',how='left')
+    del df_aux['netblock']
+    df_aux.fillna('0', inplace=True)
+    df_aux['weight'] = df_aux['weight'].astype(int)
+    return (df_aux)
+
+#------------------------------------------------------------------------------
+# check parameters
 def evaluate_args():
     parser = parser_args()
     args = parser.parse_args()
@@ -319,6 +340,11 @@ def evaluate_args():
             print ("Geo database file not found: {}".format(file))
             sys.exit(0)
 
+    if (args.weight):
+        file = args.weight[0]
+        if not (os.path.isfile(file)):
+            print ("Weight file not found: {}".format(file))
+            sys.exit(0)
 
     if (args.file):
         file = args.file
@@ -341,25 +367,24 @@ df_array = []
 
 logging.debug("init")
 
-
-## prepare dataset to sent to bq
-#if (args.normalize):
-#
-#    if (not args.bgp) or (not args.source):
-#        print ("\n\tTo normalize the measurement file you should add \"--bgp and --origin\" ")
-#        print ("\t\tvp-cli.py -v -n -f data.csv -b \"us-was-anycast01: 145.90.8.0/24; \" -s  us-was-anycast01\n")
-#        if (args.bgp==None):
-#            print ("\tBGP policy not defined.")
-#
-#        if (args.source==None):
-#            print ("\tSource (pinger) is not defined.")
-#        sys.exit(0)
-#        
-##-------
+# load DF
 df = init_load(args)
 
+
+# add weight 
+if (args.weight):
+    logging.debug("Add load based on file {}".format(args.weight[0]))
+    file_weight = args.weight[0]
+    df = add_weight(file_weight,df)
+
+# add information about geo-location using IP2location
 if (args.normalize):
-    df = add_metadata(df,args)
+
+    # add extra metadata info
+    # origin = node that has started the ping process
+    # bgp = current bgp announces
+    df['origin'] = args.source
+    df['bgp'] = args.bgp
 
     ## check for metadata and pre-processing tasks
     logging.info("saving normalized file") 
@@ -384,7 +409,6 @@ if (args.normalize):
     pool.close()
     pool.join()
 
-
     logging.info('Done MP')
     logging.debug('Done MP')
 
@@ -393,65 +417,50 @@ if (args.normalize):
     logging.info("saving dataframe ... {} done!".format(outputfile))
     print ("\r"+outputfile)
 
-#    # thread add geo info 
-#    ret = queue.Queue()
-#    the_process = threading.Thread(name='process', target=add_geo, args=(ret,args,df))
-#    the_process.start()
-#    while the_process.isAlive():
-#    	animated_loading(3) if not (args.quiet) else 0
-#    the_process.join()
-#    df = ret.get()
 
-
-#    -- save results -- 
-
-#    ret = queue.Queue()
-#    the_process = threading.Thread(name='process', target=save_df, args=(ret,args,df))
-#    the_process.start()
-#    while the_process.isAlive():
-#    	animated_loading(3) if not (args.quiet) else 0
-#    the_process.join()
-#    outputfile = ret.get()
-
-if (args.stats):
-
-    logging.debug (args.stats)
-
-     # new stats df 
-    df_summary = df.catchment.value_counts()
-
-    if (args.hitlist):
-        # total lines in the hitlist
-        total_lines_hitlist = len(open(args.hitlist[0]).readlines())
-        unknow = (total_lines_hitlist - df.catchment.value_counts().sum())
-        df_summary = df_summary.append(pd.Series({'unknown' : unknow}))
-
-    df_summary = df_summary.reset_index()
-    df_summary.columns = ['site', 'count']
-    df_summary['percent'] = (df_summary['count']/df_summary['count'].sum()).mul(100).round(1).astype(int)
-    header =  (','.join([i for i in df_summary.columns.tolist()]))
-    print ("#timestamp,{}".format(int(time.time())))
-    print ("#"+header)
-    if not (args.hitlist):
-        print ("#hitllist was not provided")
-    print (df_summary.to_csv(index=False,header=False))
+## provide load distribution per site
 else:
 
-    logging.debug('\rdataframe processing ... done! ')
-    print ("\rCatchment Node Distribution:")
     # new stats df 
-    s = df.catchment
-    counts = s.value_counts()
-    percent100 = s.value_counts(normalize=True).mul(100).round(1).astype(int)
-    df_summary = pd.DataFrame({'counts': counts, 'percent': percent100}).reset_index()
-    
-    # print ascii bar chart
-    max_value = df_summary.percent.max()
-    increment = max_value / 25
-    longest_label_length = len(df_summary['index'].max())
-    longest_count_length = len(df_summary['counts'].max().astype(str))
-    
-    ret  = df_summary.apply(bar, axis=1)
+    if (args.weight):
+        logging.debug("Stats considering the weight")
+        df_summary = df[df.weight>0].catchment.value_counts()
+    else:
+        df_summary = df.catchment.value_counts()
+
+    if (args.hitlist):
+
+        logging.debug ("add infos about unknown data [hitlist - received packages]")
+        # total lines in the hitlist
+        total_lines_hitlist = len(open(args.hitlist[0]).readlines())
+        unknown = (total_lines_hitlist - df.catchment.value_counts().sum())
+        df_summary = df_summary.append(pd.Series({'unknown' : unknown}))
+
+    # prepare dataframe 
+    df_summary = df_summary.reset_index()
+    df_summary.columns = ['site', 'counts']
+    df_summary['percent'] = (df_summary['counts']/df_summary['counts'].sum()).mul(100).round(1).astype(int)
+
+    if (args.csv):
+
+        header =  (','.join([i for i in df_summary.columns.tolist()]))
+        print ("#timestamp,{}".format(int(time.time())))
+        print ("#"+header)
+        if not (args.hitlist):
+            print ("#hitllist was not provided")
+        if (args.weight):
+            print ("#weight assigned")
+        print (df_summary.to_csv(index=False,header=False))
+
+    else:
+
+        # print ascii bar chart
+        max_value = df_summary.percent.max()
+        increment = max_value / 25
+        longest_label_length = len(df_summary['site'].max())
+        longest_count_length = len(df_summary['counts'].max().astype(str))
+        ret  = df_summary.apply(bar, axis=1)
+
 
 if not (args.quiet):
     cursor.show()
