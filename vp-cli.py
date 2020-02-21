@@ -17,10 +17,14 @@ import queue as queue
 import time 
 from argparse import RawTextHelpFormatter
 from os import linesep
-import imp
+import importlib
 import logging
 import IP2Location
-
+#from multiprocessing import Pool
+import imp
+import multiprocessing
+import numpy as np
+import cursor
 ###############################################################################
 ### Program settings
 verbose = False
@@ -56,12 +60,12 @@ def parser_args ():
     parser.add_argument('-f','--file', nargs='?', help="Verfploeter measurement output file")
     parser.add_argument("-n","--normalize", help="remove inconsistency from the measurement dataset", action="store_true")
     parser.add_argument("-g","--geo",  nargs='+', help="geo-location database - IP2Location (BIN)")
+    parser.add_argument("--hitlist",  nargs='+', help="IPv4 hitlist - used to find unknown stats", dest="hitlist")
     parser.add_argument('-s','--source', nargs='?', help="Verfploeter source pinger node")
     parser.add_argument('-b','--bgp', nargs='?', help="BGP status")
 
-
     # TODO
-    parser.add_argument("--stats", dest="stat",  choices=["load", "block", "country"], default="load",
+    parser.add_argument("--stats", dest="stats",  choices=["load", "block", "country"], default="",
 	help="show stats from the vp measurement. Potential options:" + linesep +
 	        linesep.join("    " + name for name in ["load (default)", "block", "country"]))
     return parser
@@ -84,6 +88,17 @@ def check_metadata_from_df(ret,df,args):
     df = df.fillna(0)
     df.drop_duplicates(subset="src_net",keep='first', inplace=True)
 
+    # rename columns
+    df.rename( columns={'send_receive_time_diff':'rtt',
+                        'source_address_country': 'country',
+                        'source_address_asn': 'asn',
+                        'client_id': 'catchment',
+                       }
+              ,inplace=True)
+    df = df.drop(columns=['source_address','destination_address','meta_source_address',\
+                'meta_destination_address','task_id','transmit_time','receive_time'])
+
+
     if (args.debug):
         logging.debug("After removing inconsistency: \"%d\"", len(df))
     ret.put(df)
@@ -104,26 +119,27 @@ def animated_loading(flag):
     if (flag == 3):
         chars = "▖▘▝▗"
         msg = "finding geo info      "
-    os.system('setterm -cursor off')
+    cursor.hide()
 
     if (flag == 4):
         chars = "⣾⣽⣻⢿⡿⣟⣯⣷"
         msg = "saving dataframe      "
-    os.system('setterm -cursor off')
+    cursor.hide()
 
     for char in chars:
 
         sys.stdout.write('\r'+msg+''+char)
         time.sleep(.1)
         sys.stdout.flush()
-#    os.system('setterm -cursor on')
+    cursor.show()
 
 #------------------------------------------------------------------------------
 # load the dataframe 
 def load_df (ret,file):
 
 	logging.debug("loading the dataframe") 
-	df = pd.read_csv(file, sep=",", index_col=False, low_memory=False, nrows=100,skiprows=0)
+#	df = pd.read_csv(file, sep=",", index_col=False, low_memory=False, skiprows=0, nrows=100)
+	df = pd.read_csv(file, sep=",", index_col=False, low_memory=False, skiprows=0)
 	ret.put(df) 
 
 #------------------------------------------------------------------------------
@@ -165,38 +181,55 @@ def ip2location_info(src_net, args,df):
     lon = rec.longitude if rec.longitude else 0
     
     result = "{};{};{};{}".format(country_short,region,lat,lon)
-    test = len(result.split(";"))
-    if (test != 4):
-        print (result)
     return  (result)
+
 
 
 #------------------------------------------------------------------------------
 # add geo  - threading
-def add_geo(ret,args,df):
+def get_geo_info(params): 
 
-    if not (args.geo):
-        ret.put(df)
-        return
+    df = params[0]
+    output_file = params[1]
+    ip2locationdb = params[2]
 
-    df['result'] = df['src_net'].apply(ip2location_info, args=(args,df))
-    df[['cc_ip2info','state', 'lat','long']] = df['result'].str.split (";", expand=True)
+    ip2location = IP2Location.IP2Location()
+    ip2location.open(ip2locationdb)
+    
+    # country
+    f = lambda x: ip2location.get_country_short(x)
+    df['country_ip2location'] = df['src_net'].apply(f)
+    df['country_ip2location'] = df['country_ip2location'].str.decode("utf-8").str.replace(",","")
+    
+    # region
+    f = lambda x: ip2location.get_region(x)
+    df['region'] = df['src_net'].apply(f)
+    df['region'] = df['region'].str.decode("utf-8").str.replace(",","")
+    
+    f = lambda x: ip2location.get_latitude(x)
+    df['latitude'] = df['src_net'].apply(f)
+    
+    f = lambda x: ip2location.get_longitude(x)
+    df['longitude'] = df['src_net'].apply(f)   
+    df = df.fillna(0) 
+    return ([df, output_file])
 
+#------------------------------------------------------------------------------
+#
+def collect_results(params):
 
-    # get unique IPs
-    # unique_ips = x['ip'].unique()
-    # make series out of it
-    # unique_ips = pd.Series(unique_ips, index = unique_ips)
-    # map IP --> country
-    # x['country'] = x['ip'].map(unique_ips.apply(get_country))
+    result = params[0]
+    output_file = params[1]
 
+    df_array.append(result)
+   
+    if not (os.path.isfile(output_file)):
+        with open(output_file, 'a') as f:
+            result.to_csv(f, header=True)
+    else: 
+        with open(output_file, 'a') as f:
+            result.to_csv(f, header=False)
 
-    #x['country'] = x['ip'].map(unique_ips.apply(get_country))
-
-
-
-    df.drop('result',axis=1,inplace=True)
-    ret.put(df)
 #------------------------------------------------------------------------------
 # plot the graph
 def bar(row):
@@ -218,7 +251,7 @@ def bar(row):
 # save df - threading
 def save_df(ret,args,df):
 
-    outputfile = re.sub('.csv.*', '', args.file)+"-csv.norm.gz"
+    outputfile = re.sub('.csv.*', '', args.file)+".csv.norm"
     df.to_csv(outputfile,index=False, compression="gzip")
     ret.put(outputfile)
 
@@ -237,8 +270,12 @@ def init_load(args):
     	animated_loading(0) if not (args.quiet) else 0
     the_process.join()
     df = ret.get()
-   
+    
+    # not enought lines
+    if (df.size<3):
 
+        sys.exit("{} has not enought lines to be processed".format(args.file))
+        
     if not 'transmit_time' in df.columns:
         return (df)
 
@@ -252,16 +289,6 @@ def init_load(args):
     	animated_loading(1) if not (args.quiet) else 0
     the_process.join()
     df = ret.get()
-    
-    # rename columns
-    df.rename( columns={'send_receive_time_diff':'rtt',
-                        'source_address_country': 'country',
-                        'source_address_asn': 'asn',
-                        'client_id': 'catchment',
-                       }
-              ,inplace=True)
-    df = df.drop(columns=['source_address','destination_address','meta_source_address',\
-                'meta_destination_address','task_id','transmit_time','receive_time'])
     
     return (df)
 
@@ -292,10 +319,6 @@ def evaluate_args():
             print ("Geo database file not found: {}".format(file))
             sys.exit(0)
 
-        ip2location = IP2Location.IP2Location()
-        ip2location.open(file)
-        # return reference in this var
-        args.ip2location=ip2location
 
     if (args.file):
         file = args.file
@@ -314,51 +337,106 @@ def evaluate_args():
 ### Main Process
 
 args = evaluate_args()
+df_array = []
 
-# prepare dataset to sent to bq
-if (args.normalize):
+logging.debug("init")
 
-    if (not args.bgp) or (not args.source):
-        print ("\n\tTo normalize the measurement file you should add \"--bgp and --origin\" ")
-        print ("\t\tvp-cli.py -v -n -f data.csv -b \"us-was-anycast01: 145.90.8.0/24; \" -s  us-was-anycast01\n")
-        if (args.bgp==None):
-            print ("\tBGP policy not defined.")
 
-        if (args.source==None):
-            print ("\tSource (pinger) is not defined.")
-        sys.exit(0)
-        
-#-------
+## prepare dataset to sent to bq
+#if (args.normalize):
+#
+#    if (not args.bgp) or (not args.source):
+#        print ("\n\tTo normalize the measurement file you should add \"--bgp and --origin\" ")
+#        print ("\t\tvp-cli.py -v -n -f data.csv -b \"us-was-anycast01: 145.90.8.0/24; \" -s  us-was-anycast01\n")
+#        if (args.bgp==None):
+#            print ("\tBGP policy not defined.")
+#
+#        if (args.source==None):
+#            print ("\tSource (pinger) is not defined.")
+#        sys.exit(0)
+#        
+##-------
 df = init_load(args)
+
 if (args.normalize):
     df = add_metadata(df,args)
-
 
     ## check for metadata and pre-processing tasks
     logging.info("saving normalized file") 
     logging.debug("saving normalized file")
     
-    # thread add geo info 
-    ret = queue.Queue()
-    the_process = threading.Thread(name='process', target=add_geo, args=(ret,args,df))
-    the_process.start()
-    while the_process.isAlive():
-    	animated_loading(3) if not (args.quiet) else 0
-    the_process.join()
-    df = ret.get()
+    # geo is not specify dont do anything
+    if not (args.geo):
+        logging.debug("no geo database provided")
+        print ("In file converstion (-n) you must pass the geolocation database")
+        sys.exit(1)
+    
+    chunksize = 100
+    print ("\r geolocating the dataframe   ")
+    pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
+    logging.info('Starting MP')
 
-    ret = queue.Queue()
-    the_process = threading.Thread(name='process', target=save_df, args=(ret,args,df))
-    the_process.start()
-    while the_process.isAlive():
-    	animated_loading(3) if not (args.quiet) else 0
-    the_process.join()
-    outputfile = ret.get()
+    outputfile = re.sub('.csv.*', '', args.file)+".csv.norm"
+    ip2locationdb = args.geo[0]
+  
+    for df_split in np.array_split(df, chunksize):
+        result = pool.apply_async(get_geo_info, args=[(df_split,outputfile,ip2locationdb)], callback=collect_results)
+    pool.close()
+    pool.join()
+
+
+    logging.info('Done MP')
+    logging.debug('Done MP')
+
+    # zip file
     logging.debug("saving dataframe ... {} done!".format(outputfile))
     logging.info("saving dataframe ... {} done!".format(outputfile))
     print ("\r"+outputfile)
 
+#    # thread add geo info 
+#    ret = queue.Queue()
+#    the_process = threading.Thread(name='process', target=add_geo, args=(ret,args,df))
+#    the_process.start()
+#    while the_process.isAlive():
+#    	animated_loading(3) if not (args.quiet) else 0
+#    the_process.join()
+#    df = ret.get()
+
+
+#    -- save results -- 
+
+#    ret = queue.Queue()
+#    the_process = threading.Thread(name='process', target=save_df, args=(ret,args,df))
+#    the_process.start()
+#    while the_process.isAlive():
+#    	animated_loading(3) if not (args.quiet) else 0
+#    the_process.join()
+#    outputfile = ret.get()
+
+if (args.stats):
+
+    logging.debug (args.stats)
+
+     # new stats df 
+    df_summary = df.catchment.value_counts()
+
+    if (args.hitlist):
+        # total lines in the hitlist
+        total_lines_hitlist = len(open(args.hitlist[0]).readlines())
+        unknow = (total_lines_hitlist - df.catchment.value_counts().sum())
+        df_summary = df_summary.append(pd.Series({'unknown' : unknow}))
+
+    df_summary = df_summary.reset_index()
+    df_summary.columns = ['site', 'count']
+    df_summary['percent'] = (df_summary['count']/df_summary['count'].sum()).mul(100).round(1).astype(int)
+    header =  (','.join([i for i in df_summary.columns.tolist()]))
+    print ("#timestamp,{}".format(int(time.time())))
+    print ("#"+header)
+    if not (args.hitlist):
+        print ("#hitllist was not provided")
+    print (df_summary.to_csv(index=False,header=False))
 else:
+
     logging.debug('\rdataframe processing ... done! ')
     print ("\rCatchment Node Distribution:")
     # new stats df 
@@ -375,5 +453,6 @@ else:
     
     ret  = df_summary.apply(bar, axis=1)
 
-os.system('setterm -cursor on')
+if not (args.quiet):
+    cursor.show()
 sys.exit(0)
